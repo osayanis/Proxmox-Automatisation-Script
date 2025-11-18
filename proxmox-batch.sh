@@ -23,21 +23,44 @@ menu_creation() {
     esac
 }
 
-# Fonction pour lister les templates disponibles
+# Fonction pour lister les templates disponibles avec recherche par mot-clé
 lister_templates() {
-    echo "Liste des templates disponibles :"
-    ls /var/lib/vz/template/cache/
-    echo "=============================================="
-    echo "Si la template que vous voulez n'est pas présente, entrez l'URL pour la télécharger."
-    read -p "Voulez-vous télécharger une template ? (y/n) : " reponse
-    if [ "$reponse" == "y" ]; then
-        read -p "Entrez l'URL de la template : " url
-        # Télécharger la template
-        wget -P /var/lib/vz/template/cache/ $url
-        echo "Template téléchargée avec succès."
+    read -p "Entrez un mot-clé pour rechercher des templates (ex : debian) : " keyword
+    echo "Recherche de templates contenant '$keyword' :"
+    found_templates=$(ls /var/lib/vz/template/cache/ | grep -i "$keyword")
+    
+    if [ -z "$found_templates" ]; then
+        echo "Aucun template trouvé pour '$keyword'."
+        read -p "Voulez-vous télécharger une template ? (y/n) : " reponse
+        if [ "$reponse" == "y" ]; then
+            read -p "Entrez l'URL de la template : " url
+            wget -P /var/lib/vz/template/cache/ $url
+            echo "Template téléchargée avec succès."
+        fi
+    else
+        echo "Templates trouvées :"
+        select template_choice in $found_templates "Télécharger une nouvelle template via une url"; do
+            case $template_choice in
+                "Télécharger une nouvelle template via une url")
+                    read -p "Entrez l'URL de la template : " url
+                    wget -P /var/lib/vz/template/cache/ $url
+                    echo "Template téléchargée avec succès."
+                    break
+                    ;;
+                *)
+                    # Assurez-vous que le fichier template existe réellement
+                    template_path="/var/lib/vz/template/cache/$template_choice"
+                    if [ ! -f "$template_path" ]; then
+                        echo "Le template sélectionné n'est pas trouvé, veuillez vérifier le chemin."
+                        return 1  # Recommence la recherche
+                    else
+                        echo "Vous avez sélectionné le template : $template_choice"
+                        break
+                    fi
+                    ;;
+            esac
+        done
     fi
-    sleep 2
-    menu_creation
 }
 
 # Fonction pour lister les ISO disponibles
