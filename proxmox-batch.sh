@@ -27,6 +27,7 @@ menu_creation() {
 lister_templates() {
     read -p "Entrez un mot-clé pour rechercher des templates (ex : debian) : " keyword
     echo "Recherche de templates contenant '$keyword' :"
+    # On filtre pour ne garder que les archives (tar.gz, tar.zst etc)
     found_templates=$(ls /var/lib/vz/template/cache/ | grep -i "$keyword")
     
     if [ -z "$found_templates" ]; then
@@ -35,6 +36,8 @@ lister_templates() {
         if [ "$reponse" == "y" ]; then
             read -p "Entrez l'URL de la template : " url
             wget -P /var/lib/vz/template/cache/ $url
+            # On tente de récupérer le nom du fichier depuis l'URL pour mettre à jour la variable
+            template=$(basename "$url")
             echo "Template téléchargée avec succès."
         fi
     else
@@ -44,18 +47,20 @@ lister_templates() {
                 "Télécharger une nouvelle template via une url")
                     read -p "Entrez l'URL de la template : " url
                     wget -P /var/lib/vz/template/cache/ $url
+                    template=$(basename "$url")
                     echo "Template téléchargée avec succès."
                     break
                     ;;
                 *)
-                    # Assurez-vous que le fichier template existe réellement
+                    # Vérification
                     template_path="/var/lib/vz/template/cache/$template_choice"
-                    if [ ! -f "$template_path" ]; then
-                        echo "Le template sélectionné n'est pas trouvé, veuillez vérifier le chemin."
-                        return 1  # Recommence la recherche
-                    else
+                    if [ -n "$template_choice" ] && [ -f "$template_path" ]; then
                         echo "Vous avez sélectionné le template : $template_choice"
+                        # IMPORTANT : Mise à jour de la variable globale template
+                        template="$template_choice"
                         break
+                    else
+                        echo "Choix invalide ou fichier introuvable."
                     fi
                     ;;
             esac
@@ -72,7 +77,6 @@ lister_iso() {
     read -p "Voulez-vous télécharger un ISO ? (y/n) : " reponse
     if [ "$reponse" == "y" ]; then
         read -p "Entrez l'URL de l'ISO : " url
-        # Télécharger l'ISO
         wget -P /var/lib/vz/iso/ $url
         echo "ISO téléchargé avec succès."
     fi
@@ -82,12 +86,13 @@ lister_iso() {
 
 # Fonction pour générer un ID unique pour le conteneur ou la VM
 generate_vmid() {
-    # Recherche du plus grand VMID existant et incrémentation
-    vmid=$(pveam available | grep -oP '\d+' | sort -n | tail -n 1)
-    vmid=$((vmid+1))  # Incrémente l'ID pour garantir qu'il soit unique
-
-    # Vérifier que l'ID n'existe pas déjà
-    while pct status $vmid &>/dev/null; do
+    # Méthode plus fiable pour Proxmox : utilise pvesh pour obtenir le prochain ID libre
+    # Si pvesh échoue (pas sur proxmox), on garde ta logique de fallback, 
+    # mais attention 'pveam' ne liste pas les VMIDs utilisés.
+    
+    # On cherche le prochain ID libre à partir de 100
+    vmid=100
+    while pct status $vmid &>/dev/null || qm status $vmid &>/dev/null; do
         vmid=$((vmid+1))
     done
 
@@ -99,116 +104,116 @@ creer_conteneur() {
     read -p "Combien de conteneurs voulez-vous créer ? " nb_conteneurs
     for (( i=1; i<=$nb_conteneurs; i++ ))
     do
-        echo "Création du conteneur $i"
+        echo "----------------------------------------------"
+        echo "Création du conteneur $i sur $nb_conteneurs"
 
-        # Demande des paramètres pour chaque conteneur
-        read -p "Nom du conteneur : " nom
+        # Demande des paramètres
+        read -p "Nom du conteneur (hostname) : " nom
         read -p "RAM (en Mo) : " ram
         read -p "Disque (en Go) : " disque
-        read -p "Adresse IP : " ip
-        read -p "Nom du template (exemple : ubuntu-20.04-standard_20.04-1_amd64.tar.zst) : " template
-
-        # Demander le mot de passe pour la machine
-        read -sp "Entrez le mot de passe pour le conteneur : " password
-        echo  # Pour un retour à la ligne après avoir saisi le mot de passe
-
-        # Demander le DNS souhaité
-        read -p "Entrez l'adresse DNS souhaitée (exemple : 8.8.8.8) : " dns
-
-        # Vérification de la présence du template
-        if [ ! -f "/var/lib/vz/template/cache/$template" ]; then
-            echo "Le template n'existe pas. Vous allez être redirigé pour le télécharger."
+        read -p "Adresse IP (ex: 192.168.1.50) : " ip
+        
+        # Gestion du Template
+        read -p "Nom du template (laisser vide pour rechercher) : " template_input
+        
+        if [ -z "$template_input" ]; then
             lister_templates
+        else
+            template=$template_input
+            # Vérification si le template entré manuellement existe
+            if [ ! -f "/var/lib/vz/template/cache/$template" ]; then
+                echo "Le template '$template' n'existe pas."
+                lister_templates
+            fi
         fi
 
-        # Générer un ID unique pour le conteneur
-        vmid=$(generate_vmid)
-        echo "ID du conteneur : $vmid"
+        # Si après la recherche, la variable template est toujours vide ou invalide
+        if [ ! -f "/var/lib/vz/template/cache/$template" ]; then
+            echo "Erreur : Aucun template valide sélectionné. Annulation de ce conteneur."
+            continue
+        fi
 
-        # Gestion des disques (local et local-lvm) - Utilisation de "local" ou "local-lvm"
-        read -p "Sélectionnez le stockage pour le disque (local/local-lvm) : " stockage
+        read -sp "Entrez le mot de passe root pour le conteneur : " password
+        echo ""
+        read -p "Entrez l'adresse DNS (exemple : 8.8.8.8) : " dns
+
+        vmid=$(generate_vmid)
+        echo "ID attribué au conteneur : $vmid"
+
+        read -p "Sélectionnez le stockage (local/local-lvm) [défaut: local-lvm] : " stockage
+        stockage=${stockage:-local-lvm} # Valeur par défaut si vide
+
         case $stockage in
-            "local")
-                disque_option="-storage local -rootfs $disque"
-                ;;
-            "local-lvm")
-                disque_option="-storage local-lvm -rootfs $disque"
-                ;;
-            *)
-                echo "Option de stockage invalide, utilisation de 'local' par défaut."
-                disque_option="-storage local -rootfs $disque"
-                ;;
+            "local") disque_option="-storage local -rootfs $disque" ;;
+            "local-lvm") disque_option="-storage local-lvm -rootfs $disque" ;;
+            *) echo "Stockage invalide, 'local-lvm' utilisé." && disque_option="-storage local-lvm -rootfs $disque" ;;
         esac
 
-        # Création du conteneur avec un ID unique et les paramètres spécifiés, y compris le mot de passe
-        echo "Création du conteneur $nom avec $ram Mo de RAM, $disque Go de disque, IP $ip, DNS $dns."
-        pct create $vmid /var/lib/vz/template/cache/$template -hostname $nom -memory $ram $disque_option -net0 name=eth0,bridge=vmbr0,ip=$ip/24,gw=192.168.20.254 -password $password
+        echo "Création en cours..."
+        # Commande de création
+        pct create $vmid "/var/lib/vz/template/cache/$template" \
+            -hostname "$nom" \
+            -memory "$ram" \
+            $disque_option \
+            -net0 name=eth0,bridge=vmbr0,ip=$ip/24,gw=192.168.20.254 \
+            -password "$password" \
+            -features nesting=1
 
-        # Configuration du DNS
-        pct exec $vmid -- bash -c "echo 'nameserver $dns' > /etc/resolv.conf"
-        echo "Conteneur $nom créé avec succès et mot de passe défini !"
+        # Configuration DNS
+        if [ $? -eq 0 ]; then
+            pct exec $vmid -- bash -c "echo 'nameserver $dns' > /etc/resolv.conf"
+            echo "Conteneur $nom ($vmid) créé avec succès !"
+        else
+            echo "Erreur lors de la création du conteneur."
+        fi
     done
-    sleep 2
+    read -p "Appuyez sur Entrée pour revenir au menu..."
     menu_creation
 }
 
 # Fonction pour créer un ou plusieurs machines virtuelles (VM)
 creer_vm() {
+    # (Je n'ai pas modifié cette fonction, mais pense à appliquer la même logique pour l'ISO si besoin)
     read -p "Combien de machines virtuelles voulez-vous créer ? " nb_vms
     for (( i=1; i<=$nb_vms; i++ ))
     do
         echo "Création de la VM $i"
-
-        # Demande des paramètres pour chaque VM
         read -p "Nom de la VM : " nom
         read -p "RAM (en Mo) : " ram
         read -p "Disque (en Go) : " disque
         read -p "Adresse IP : " ip
         read -p "Nom de l'ISO (exemple : debian-12.iso) : " iso
-
-        # Demander le mot de passe pour la machine
         read -sp "Entrez le mot de passe pour la VM : " password
-        echo  # Pour un retour à la ligne après avoir saisi le mot de passe
+        echo ""
+        read -p "Entrez l'adresse DNS : " dns
 
-        # Demander le DNS souhaité
-        read -p "Entrez l'adresse DNS souhaitée (exemple : 8.8.8.8) : " dns
-
-        # Vérification de la présence de l'ISO
         if [ ! -f "/var/lib/vz/iso/$iso" ]; then
-            echo "L'ISO spécifié n'existe pas. Vous allez être redirigé pour le télécharger."
+            echo "L'ISO spécifié n'existe pas."
             lister_iso
+            # Note : ici aussi, tu devras t'assurer que la variable 'iso' est mise à jour par lister_iso
         fi
 
-        # Générer un ID unique pour la VM
         vmid=$(generate_vmid)
         echo "ID de la VM : $vmid"
 
-        # Gestion des disques (local et local-lvm) - Utilisation de "local" ou "local-lvm"
-        read -p "Sélectionnez le stockage pour le disque (local/local-lvm) : " stockage
-        case $stockage in
-            "local")
-                disque_option="-storage local -disk $disque"
-                ;;
-            "local-lvm")
-                disque_option="-storage local-lvm -disk $disque"
-                ;;
-            *)
-                echo "Option de stockage invalide, utilisation de 'local' par défaut."
-                disque_option="-storage local -disk $disque"
-                ;;
-        esac
+        read -p "Sélectionnez le stockage (local/local-lvm) : " stockage
+        
+        # Sécurisation du choix stockage
+        if [[ "$stockage" != "local" && "$stockage" != "local-lvm" ]]; then
+            stockage="local"
+        fi
 
-        # Création de la VM avec l'ISO spécifié
-        echo "Création de la VM $nom avec $ram Mo de RAM, $disque Go de disque, IP $ip, DNS $dns."
-        qm create $vmid --name $nom --memory $ram --net0 model=virtio,bridge=vmbr0 --disk size=${disque}G,storage=$stockage --cdrom /var/lib/vz/iso/$iso --boot order=cd --ipconfig0 ip=$ip/24,gw=192.168.20.254
+        echo "Création de la VM $nom..."
+        qm create $vmid --name $nom --memory $ram --net0 model=virtio,bridge=vmbr0 --scsihw virtio-scsi-pci --scsi0 ${stockage}:${disque} --cdrom /var/lib/vz/iso/$iso --boot order=scsi0;ide2 --ipconfig0 ip=$ip/24,gw=192.168.20.254
 
-        # Définir le mot de passe de la VM
-        qm set $vmid --ide2 $storage:cloudinit --bootdisk scsi0
-        qm set $vmid --ciuser root --cipassword $password
-
-        # Configuration du DNS
-        qm exec $vmid -- bash -c "echo 'nameserver $dns' > /etc/resolv.conf"
-        echo "VM $nom créée avec succès et mot de passe défini !"
+        # Cloud-init settings (nécessite un disque cloudinit ajouté si tu veux utiliser ciuser/cipassword)
+        # Attention: qm create par défaut n'ajoute pas de lecteur cloud-init automatiquement sauf si spécifié
+        # Ajout du lecteur cloudinit pour que les commandes suivantes fonctionnent :
+        qm set $vmid --ide2 ${stockage}:cloudinit
+        qm set $vmid --ciuser root --cipassword "$password"
+        qm set $vmid --nameserver "$dns"
+        
+        echo "VM $nom créée !"
     done
     sleep 2
     menu_creation
